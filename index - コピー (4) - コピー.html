@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Moai Robo — Yogurt Run EX (Final)</title>
+<style>
+:root{--bg:#0b1020;--fg:#e6f0ff;--ui:#111827}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif}
+#wrap{display:flex;flex-direction:column;height:100%}
+#game{flex:1 1 auto;display:flex;align-items:center;justify-content:center;position:relative;}
+canvas{width:100vw;height:100vh;image-rendering:pixelated;touch-action:none;background:#000}
+#hud{position:fixed;top:8px;left:8px;background:#0008;padding:4px 8px;border-radius:8px;font:12px monospace;z-index:3}
+#ctrls{position:fixed;bottom:14px;left:0;right:0;display:flex;justify-content:space-between;padding:0 16px;gap:12px;z-index:2}
+.btn{flex:1;background:var(--ui);color:var(--fg);border:1px solid #374151;border-radius:14px;padding:10px 8px;text-align:center;font-weight:700;user-select:none}
+.btn:active{background:#374151;}
+#start,#over{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:#0b1020;z-index:4}
+#over{display:none}
+#title{font:22px/1.2 monospace;letter-spacing:.5px;opacity:.95;text-align:center;margin-bottom:4px}
+.small{font:12px monospace;opacity:.8;text-align:center}
+#overTitle{font:20px monospace;margin-bottom:4px}
+#mute{position:fixed;top:8px;right:8px;z-index:3;
+  background:#111827;color:#e6f0ff;border:1px solid #374151;
+  border-radius:12px;padding:6px 10px;font:12px/1 system-ui,monospace}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="game">
+    <canvas id="cv" width="360" height="200"></canvas>
+  </div>
+
+  <div id="hud">
+    S:<span id="sc">0</span>
+    &nbsp;L:<span id="lf">3</span>
+    &nbsp;ST:<span id="st">1</span>
+    &nbsp;T:<span id="tg">200</span>
+  </div>
+
+  <button id="mute" aria-pressed="false" title="Sound">🔇 音OFF</button>
+
+  <div id="ctrls">
+    <div class="btn" id="jump">JUMP</div>
+    <div class="btn" id="shot">SHOT</div>
+    <div class="btn" id="drop">DROP</div>
+  </div>
+
+  <div id="start">
+    <div style="font-size:40px;margin-bottom:10px;">🗿</div>
+    <div id="title">MOAI ROBO — YOGURT RUN EX</div>
+    <div class="small">
+      Tap/Space/↑: Jump | ↓: Drop<br>F/SHOT: Attack (Final Stage)
+    </div>
+    <div class="btn" id="go" style="width:120px;margin-top:10px;">GAME START</div>
+  </div>
+
+  <div id="over">
+    <div id="overTitle">GAME OVER</div>
+    <div id="scoreline" class="small"></div>
+    <div class="btn" id="retry" style="width:120px;">RETRY</div>
+  </div>
+</div>
+
+<script>
+(()=>{
+// ====================================
+//  CONSTANTS & CONFIG
+// ====================================
+const G = { W:360, H:200, GROUND:200-24 };
+const MAX_LIVES = 5;
+
+// Stages
+const STAGES = [
+  { id:1, name:'PLAIN',   target:  150, speed:1.8, obsRate:0.9, droneRate:0.25, spikeRate:0.3 },
+  { id:2, name:'SUNSET',  target:  180, speed:2.2, obsRate:1.1, droneRate:0.30, spikeRate:0.35 },
+  { id:3, name:'CITY',    target: 200, speed:2.6, obsRate:1.3, droneRate:0.36, spikeRate:0.4 },
+  { id:4, name:'SNOW',    target: 240, speed:3.0, obsRate:1.5, droneRate:0.42, spikeRate:0.45 },
+  { id:5, name:'BOSS',    target: Infinity, speed:2.4, obsRate:0.0, droneRate:0.0, spikeRate:0.0, boss:true }
+];
+
+// ====================================
+//  CANVAS SETUP
+// ====================================
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+function fitCanvas(){
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  const scale = Math.floor(Math.min(innerWidth/G.W, innerHeight/G.H) * dpr);
+  cv.width  = G.W * scale;
+  cv.height = G.H * scale;
+  cv.style.width  = (G.W * scale / dpr) + 'px';
+  cv.style.height = (G.H * scale / dpr) + 'px';
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+fitCanvas();
+addEventListener('resize', fitCanvas);
+
+// ====================================
+//  IMAGE LOADING (変更点: authorImageの追加)
+// ====================================
+const moaiImage = new Image();
+moaiImage.src = 'moai_robo.png';
+let moaiImageLoaded = false;
+moaiImage.onload = () => { moaiImageLoaded = true; };
+moaiImage.onerror = () => { console.error("Error loading moai_robo.png. Check file path."); };
+
+const authorImage = new Image();
+authorImage.src = 'boss_author.png';
+let authorImageLoaded = false;
+authorImage.onload = () => { authorImageLoaded = true; };
+authorImage.onerror = () => { console.error("Error loading boss_author.png. Check file path."); };
+
+
+// ====================================
+//  AUDIO SYSTEM
+// ====================================
+let AC = null;
+let audioUnlocked = false;
+let muted = false;
+
+function audioCtx(){
+  if(!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+  return AC;
+}
+
+['touchstart','mousedown','keydown'].forEach(ev=>{
+  addEventListener(ev, async ()=>{
+    try{
+      const c = audioCtx();
+      if(c.state === 'suspended') await c.resume();
+      audioUnlocked = true;
+    }catch(e){}
+  }, {passive:true});
+});
+
+function beep(freq=440, dur=0.07, type='square', vol=0.18){
+  if(muted) return;
+  try{
+    const c = audioCtx();
+    const now = c.currentTime;
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, now);
+    o.connect(g); g.connect(c.destination);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(vol, now+0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, now+dur);
+    o.start(now);
+    o.stop(now+dur+0.05);
+  }catch(e){}
+}
+
+// ファンファーレ（簡略化）
+function playFanfare(){
+    if(muted) return;
+    beep(784, 0.1, 'sine', 0.2);
+    setTimeout(()=>beep(988, 0.15, 'sine', 0.25), 100);
+    setTimeout(()=>beep(1319, 0.3, 'sine', 0.3), 300);
+}
+
+const muteBtn = document.getElementById('mute');
+function updateMuteUI(){
+  muteBtn.textContent = muted ? '🔇 音OFF' : '🔊 音ON';
+  muteBtn.setAttribute('aria-pressed', String(!muted));
+}
+muteBtn.addEventListener('click', ()=>{
+  muted = !muted;
+  updateMuteUI();
+  if(!muted) beep(660,0.06,'square',0.2);
+});
+updateMuteUI();
+
+// ====================================
+//  GAME STATE
+// ====================================
+let state = 'START'; // START, PLAY, ENDING, OVER
+let score = 0;
+let best = 0;
+let lives = 3;
+let t = 0;
+
+let stageIndex = 0;
+let currentStage = STAGES[0];
+
+const player = { x:80, y:G.GROUND, vy:0, onG:true, bg:0, speed:0, bob:0 };
+const items = [];
+const obstacles = [];
+let itemSpawn = 30;
+let obstacleSpawn = 60;
+
+// Boss
+const BOSS_MAX_HP = 100;
+const BOSS_ATTACKS = ['BeerShot', 'Laser', 'Homing'];
+const boss = { 
+  active:false, x:G.W-60, y:G.GROUND-40, hp:BOSS_MAX_HP, timer:0, dir:1, 
+  attackIndex:0, attackTimer:180, 
+  isCharging:false, beamWidth:0
+};
+const bossShots = []; // Beer bottles and Homing shots
+const bullets   = []; // Yogurt shots (Player's)
+
+// Ending
+let endScrollY = 0;
+const CREDITS = [
+  "CONGRATULATIONS!", "",
+  "MOAI ROBO - YOGURT RUN EX", "",
+  "--- CAST ---",
+  "Hero: MOAI ROBO",
+  "Villain: THE AUTHOR",
+  "Items: YOGURT, BEER, STRAWBERRY MILK", "",
+  "--- SPECIAL THANKS ---",
+  "Kanazawa Moai Project",
+  "Gemini AI",
+  "AND YOU!", "",
+  "Thank you for playing."
+];
+
+// HUD Elements
+const scEl = document.getElementById('sc');
+const lfEl = document.getElementById('lf');
+const stEl = document.getElementById('st');
+const tgEl = document.getElementById('tg');
+const overEl = document.getElementById('over');
+const startEl = document.getElementById('start');
+
+// ====================================
+//  DRAWING FUNCTIONS
+// ====================================
+function drawSky(){
+  let skyHex = '#79bff0';
+  if(currentStage.id===2) skyHex = '#ff9966';
+  if(currentStage.id===3) skyHex = '#0f172a';
+  if(currentStage.id===4) skyHex = '#e0f2fe';
+  if(currentStage.id===5) skyHex = '#1a0b2e';
+  
+  ctx.fillStyle = skyHex;
+  ctx.fillRect(0,0,G.W,G.H);
+
+  ctx.globalAlpha = 0.1;
+  ctx.fillStyle = '#fff';
+  for(let y=0; y<G.H; y+=2){
+    for(let x=((y>>1)&1)?1:0; x<G.W; x+=2){
+      ctx.fillRect(x,y,1,1);
+    }
+  }
+  ctx.fillStyle = '#000';
+  ctx.globalAlpha = 0.05;
+  for(let y=0; y<G.H; y+=4){
+    ctx.fillRect(0,y,G.W,1);
+  }
+  ctx.globalAlpha = 1;
+
+  if(currentStage.id===1 || currentStage.id===4){
+    ctx.fillStyle = '#fff';
+    const cloudSpeed = t * 0.2;
+    for(let i=0; i<3; i++){
+        let cx = ((i*120) - cloudSpeed) % (G.W+100);
+        if(cx < -50) cx += G.W+100;
+        let cy = 30 + (i*20);
+        ctx.fillRect(cx, cy, 30, 8);
+        ctx.fillRect(cx+8, cy-8, 14, 8);
+        ctx.fillRect(cx+4, cy+8, 20, 4);
+    }
+  }
+
+  if(currentStage.id===3 || currentStage.id===5){
+    ctx.fillStyle = '#fff';
+    for(let i=0; i<30; i++){
+      let sx = ((i*67) - player.bg*0.1) % G.W;
+      if(sx<0) sx+=G.W;
+      let sy = (i*93)%100;
+      ctx.fillRect(sx,sy,1,1);
+    }
+  }
+}
+
+function drawGround(){
+  let g1='#2a612a', g2='#72d65c', g3='#60352f';
+  if(currentStage.id===4) { g1='#3b82f6'; g2='#bfdbfe'; g3='#1e3a8a'; }
+  if(currentStage.id===5) { g1='#374151'; g2='#6b7280'; g3='#111827'; }
+
+  for(let x=0; x<G.W; x+=16){
+    let dx = x - (player.bg % 16);
+    ctx.fillStyle=g3; ctx.fillRect(dx,G.H-20,16,20);
+    ctx.fillStyle=g1; ctx.fillRect(dx,G.H-24,16,4);
+    ctx.fillStyle=g2; ctx.fillRect(dx+((x>>1)&1),G.H-23,2,2);
+    
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.fillRect(dx+4, G.H-12, 2, 2);
+    ctx.fillRect(dx+10, G.H-6, 2, 2);
+  }
+}
+
+// Moaiの描画 (外部画像参照)
+function drawMoai(){
+  if(!moaiImageLoaded) return; 
+
+  const x=player.x;
+  const y=player.y;
+  const bob = Math.sin(player.bob)*1.5;
+  const frameWidth = 32; 
+  const frameHeight = 48; 
+  
+  // 描画位置調整 (プレイヤーの中心が足元の中心になるように調整)
+  const drawX = x - frameWidth/2; 
+  const drawY = y - frameHeight + bob;
+
+  // 画像全体を描画 (アニメーション対応のSpriteSheetではないことを前提)
+  ctx.drawImage(
+    moaiImage, 
+    0, 0, moaiImage.width, moaiImage.height, 
+    drawX, drawY, frameWidth, frameHeight   
+  );
+
+  // 走っている際の土埃エフェクト（簡略化）
+  if(player.onG){
+    ctx.fillStyle = '#fff9';
+    const dustX = drawX + frameWidth/4;
+    const dustY = y - 4;
+    
+    ctx.fillRect(dustX - 4, dustY, 4, 2);
+    ctx.fillRect(dustX - 8, dustY + 2, 2, 2);
+  }
+}
+
+function drawBottle(it){ // Yogurt (10pt) or Strawberry Milk (20pt)
+  const x=(it.x-9)|0, y=(it.y-26)|0;
+  
+  // スコアに基づきラベル色を決定 (いちごミルクは20pt)
+  const labelColor = it.score === 20 ? '#ec4899' : '#60a5fa'; // Strawberry Pink or Yogurt Blue
+  
+  // Cap
+  ctx.fillStyle = '#3b82f6';
+  ctx.fillRect(x+6, y+4, 6, 2);
+  // Neck
+  ctx.fillStyle = '#f3f4f6';
+  ctx.fillRect(x+7, y+6, 4, 2);
+  // Body
+  ctx.fillStyle = '#f3f4f6';
+  ctx.fillRect(x+4, y+8, 10, 14);
+  // Label
+  ctx.fillStyle = it.heal ? '#facc15' : labelColor;
+  ctx.fillRect(x+4, y+12, 10, 4);
+  // Shine
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x+11, y+9, 1, 10);
+  
+  ctx.strokeStyle = '#1e3a8a';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x+4.5, y+8.5, 9, 13);
+}
+
+function drawBeer(s){ // Boss Projectile (Beer)
+  if(s.type !== 'BeerShot') return;
+  const x=s.x, y=s.y;
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.rotate(t*0.2);
+  
+  ctx.fillStyle='#78350f'; 
+  ctx.fillRect(-4,-8,8,16);
+  ctx.fillRect(-2,-12,4,4);
+  ctx.fillStyle='#f59e0b';
+  ctx.fillRect(-4,-2,8,6);
+  
+  ctx.restore();
+}
+
+function drawHomingShot(s){ // Boss Projectile (Homing)
+  if(s.type !== 'Homing') return;
+  const x=s.x, y=s.y;
+  const color = (t%10 < 5) ? '#ff5555' : '#ff0000';
+  
+  ctx.fillStyle = color;
+  ctx.fillRect(x-4, y-4, 8, 8);
+  ctx.fillStyle = '#ffcc00';
+  ctx.fillRect(x-2, y-2, 4, 4);
+}
+
+function drawDrone(d){
+  const x=(d.x)|0, y=(d.y)|0;
+  const bob = Math.sin(t*0.5)*2;
+  
+  ctx.fillStyle=(d.type==='DiveDrone' ? '#1f2937' : '#475569');
+  ctx.fillRect(x-8, y-6+bob, 16, 12);
+  ctx.fillStyle = (t%20<10) ? '#ef4444' : '#7f1d1d';
+  ctx.fillRect(x-4, y-2+bob, 8, 4);
+  ctx.fillStyle='#cbd5e1';
+  if((t%4)<2) ctx.fillRect(x-12, y-10+bob, 24, 2);
+  else        ctx.fillRect(x-10, y-10+bob, 20, 2);
+  ctx.fillStyle='#1e293b';
+  ctx.fillRect(x-6, y+6+bob, 2, 4);
+  ctx.fillRect(x+4, y+6+bob, 2, 4);
+}
+
+function drawSpike(d){
+    const x=(d.x)|0, y=G.GROUND+2;
+    ctx.fillStyle='#374151';
+    ctx.fillRect(x-8, y-4, 16, 4);
+    
+    ctx.fillStyle='#ef4444';
+    for(let i=0; i<3; i++){
+        const sx = x - 6 + i*6;
+        ctx.beginPath();
+        ctx.moveTo(sx, y);
+        ctx.lineTo(sx+4, y);
+        ctx.lineTo(sx+2, y-8);
+        ctx.fill();
+    }
+}
+
+function drawMine(d){
+  const x=(d.x)|0, y=(d.y)|0;
+  const bob = Math.sin(t*0.5)*2;
+  
+  ctx.fillStyle='#dc2626';
+  ctx.beginPath();
+  ctx.arc(x, y+bob, 8, 0, 6.28);
+  ctx.fill();
+  
+  ctx.fillStyle='#111827';
+  ctx.fillRect(x-10, y-2+bob, 20, 4);
+  ctx.fillRect(x-2, y-10+bob, 4, 20);
+}
+
+// [修正箇所] Bossの描画 (外部画像参照)
+function drawBoss(){
+  if(!boss.active || !authorImageLoaded) return;
+  const x = boss.x;
+  const y = boss.y + Math.sin(t*0.05)*4;
+
+  ctx.save();
+  ctx.translate(x,y);
+  
+  // 画像を描画
+  const frameWidth = 32; 
+  const frameHeight = 50; 
+  const drawX = -frameWidth/2;
+  const drawY = -frameHeight/2; // ボスのY座標を画像の中心と仮定
+
+  ctx.drawImage(
+    authorImage, 
+    0, 0, authorImage.width, authorImage.height, 
+    drawX, drawY, frameWidth, frameHeight   
+  );
+
+  // レーザーチャージのエフェクト
+  if(boss.isCharging){
+    ctx.fillStyle = (t%10<5) ? '#ff0000' : '#ffaa00';
+    ctx.beginPath();
+    ctx.arc(0, 0, 10 + Math.sin(t*0.5)*2, 0, 6.28);
+    ctx.fill();
+  }
+  
+  ctx.restore();
+
+  // HP Bar
+  const hpRate = Math.max(0,boss.hp)/BOSS_MAX_HP;
+  const bw = 120;
+  ctx.fillStyle='#000'; ctx.fillRect(G.W/2-bw/2, 8, bw, 8);
+  ctx.fillStyle='#dc2626'; ctx.fillRect(G.W/2-bw/2, 8, bw*hpRate, 8);
+
+  // レーザービーム描画
+  if(boss.beamWidth > 0){
+    const beamY = boss.y; // ボスの中心からビームを出すと仮定
+    const beamW = boss.beamWidth;
+    ctx.fillStyle = `rgba(255, 0, 0, ${beamW/30})`;
+    ctx.fillRect(boss.x-5, beamY - beamW/2, -G.W, beamW);
+    
+    ctx.fillStyle = 'rgba(255, 255, 0, 0.8)';
+    ctx.fillRect(boss.x-5, beamY - 1, -G.W, 2);
+  }
+}
+// ====================================
+
+// ====================================
+//  LOGIC (変更なし)
+// ====================================
+function initGame(){
+  state = 'START';
+  score = 0;
+  lives = 3;
+  stageIndex = 0;
+  loadStage(0);
+  startEl.style.display = 'flex';
+  overEl.style.display = 'none';
+}
+
+function loadStage(idx){
+  stageIndex = idx;
+  currentStage = STAGES[stageIndex];
+  items.length = 0;
+  obstacles.length = 0;
+  bossShots.length = 0;
+  bullets.length = 0;
+  
+  player.x = 80;
+  player.y = G.GROUND;
+  player.vy = 0;
+  player.speed = currentStage.speed;
+  player.bg = 0;
+  
+  stEl.textContent = currentStage.name;
+  tgEl.textContent = isFinite(currentStage.target) ? currentStage.target : '----';
+
+  if(currentStage.boss){
+    // ファイナルステージ開始時の残機復活
+    lives = MAX_LIVES; 
+
+    boss.active = true;
+    boss.hp = BOSS_MAX_HP;
+    boss.timer = 0;
+    boss.x = G.W - 60;
+    boss.attackIndex = 0;
+    boss.attackTimer = 180;
+    boss.isCharging = false;
+    boss.beamWidth = 0;
+  } else {
+    boss.active = false;
+  }
+}
+
+function startGame(){
+  if(state === 'START' || state === 'OVER'){
+    state = 'PLAY';
+    if(lives <= 0) {
+      score = 0;
+      lives = 3;
+      loadStage(0);
+    }
+    startEl.style.display = 'none';
+    overEl.style.display = 'none';
+    beep(660,0.1,'square',0.2);
+  }
+}
+
+function fireBeam(){
+  boss.beamWidth = 20; 
+  beep(1500, 0.05, 'square', 0.5);
+}
+
+function bossAttack(){
+  boss.attackTimer--;
+  const attackType = BOSS_ATTACKS[boss.attackIndex];
+  const bx = boss.x - 20;
+  const by = boss.y - 20;
+
+  // 攻撃パターン切り替え
+  if(boss.attackTimer <= 0){
+    boss.attackIndex = (boss.attackIndex + 1) % BOSS_ATTACKS.length;
+    boss.attackTimer = 180; 
+    boss.isCharging = false;
+    boss.beamWidth = 0;
+    return;
+  }
+  
+  // Beer Shot (ビール瓶投擲) - いろんな軌道で投げる
+  if(attackType === 'BeerShot' && boss.attackTimer % 45 === 0 && boss.attackTimer > 90){
+    const targetX = player.x;
+    const targetY = player.y - 15;
+    
+    // いろんな軌道で投げるための初期速度計算
+    const angleToTarget = Math.atan2(targetY - by, targetX - bx);
+    const randomOffset = (Math.random() - 0.5) * 0.6; // -0.3から+0.3ラジアンのズレ
+    const initialAngle = angleToTarget + randomOffset;
+    const initialSpeed = 8 + (Math.random() * 4); // 8〜12のランダムな速度
+
+    const vx = Math.cos(initialAngle) * initialSpeed;
+    const vy = Math.sin(initialAngle) * initialSpeed;
+
+    bossShots.push({x:bx, y:by, vx:vx, vy:vy, type:'BeerShot', gravity:0.2}); // 重力パラメーター追加
+    beep(150,0.1,'sawtooth',0.1);
+  }
+
+  // Laser (レーザービーム)
+  if(attackType === 'Laser'){
+    if(boss.attackTimer === 160) boss.isCharging = true;
+    if(boss.attackTimer > 120 && boss.attackTimer < 160){
+      boss.isCharging = true; 
+      if(boss.attackTimer % 10 === 0) beep(800-boss.attackTimer*3, 0.05, 'sine', 0.1); 
+    }
+    if(boss.attackTimer === 120){
+      boss.isCharging = false;
+      fireBeam();
+    }
+    if(boss.attackTimer > 100 && boss.attackTimer < 120){
+      boss.beamWidth = Math.max(0, boss.beamWidth - 1);
+      if(boss.beamWidth === 0) boss.attackTimer = 90;
+    }
+  }
+
+  // Homing Shot (追尾弾)
+  if(attackType === 'Homing' && boss.attackTimer % 60 === 0 && boss.attackTimer > 60){
+    const dx = player.x - bx;
+    const dy = player.y - by;
+    const angle = Math.atan2(dy, dx);
+    const speed = 2.5;
+    bossShots.push({x:bx, y:by, vx:Math.cos(angle)*speed, vy:Math.sin(angle)*speed, type:'Homing', homingTarget:player});
+    beep(200,0.08,'triangle',0.15);
+  }
+}
+
+function updatePlay(){
+  t++;
+  player.bg += player.speed;
+  player.bob += 0.2;
+
+  player.vy += 0.44;
+  player.y += player.vy;
+  if(player.y >= G.GROUND){
+    player.y = G.GROUND;
+    player.vy = 0;
+    player.onG = true;
+  }
+
+  const isBoss = currentStage.boss && boss.active;
+
+  if(!isBoss){
+    // アイテムスポーン（いちごミルクの追加）
+    if(--itemSpawn <= 0){
+      const isStrawberry = Math.random() < 0.15;
+      const scoreValue = isStrawberry ? 20 : 10;
+      const isHeal = Math.random() < 0.05;
+      items.push({ x:G.W+20, y:G.GROUND-10-Math.random()*40, taken:false, heal:isHeal, score:scoreValue });
+      itemSpawn = (30/player.speed * currentStage.obsRate)|0 + Math.random()*20;
+    }
+    
+    // 敵スポーン
+    if(--obstacleSpawn <= 0){
+        const r = Math.random();
+        if(r < currentStage.droneRate){
+            const type = (Math.random() < 0.7) ? 'Drone' : 'DiveDrone';
+            const y = (type === 'Drone') ? G.GROUND-(Math.random()<0.6?20:50) : 0;
+            obstacles.push({ x:G.W+20, y:y, type:type, hit:false, vy:0 });
+        } else if(r < currentStage.droneRate + currentStage.spikeRate){
+            obstacles.push({ x:G.W+20, y:G.GROUND+2, type:'Spike', hit:false });
+        } else if(r < currentStage.droneRate + currentStage.spikeRate + 0.1) {
+            obstacles.push({ x:G.W+20, y:G.GROUND-50, type:'Mine', hit:false, startY:G.GROUND-50, amplitude: 30, phase: Math.random()*6.28 });
+        }
+        obstacleSpawn = (60/player.speed * currentStage.obsRate)|0 + Math.random()*40;
+    }
+
+    if(t%600===0) player.speed = Math.min(player.speed+0.1, 4.0);
+  }
+
+  // Boss Logic
+  if(isBoss){
+    boss.timer++;
+    boss.y = G.GROUND - 40 + Math.sin(boss.timer*0.04)*15; // ボスのY座標を修正
+    bossAttack();
+    
+    // Check Boss Hit
+    for(let i=bullets.length-1;i>=0;i--){
+      const b=bullets[i];
+      // 当たり判定を調整
+      if(Math.abs(b.x-boss.x)<28 && Math.abs(b.y-boss.y)<30){ 
+        boss.hp -= 4;
+        bullets.splice(i,1);
+        beep(800,0.05,'square',0.1);
+        if(boss.hp <= 0){
+          state = 'ENDING';
+          endScrollY = G.H;
+          // エンドロール開始時のファンファーレ
+          playFanfare(); 
+          return;
+        }
+      }
+    }
+  }
+
+  // Move & Collide
+  items.forEach(it => it.x -= player.speed);
+  for(let i=items.length-1;i>=0;i--){
+    const it=items[i];
+    if(!it.taken && Math.abs(it.x-player.x)<14 && Math.abs(it.y-player.y+10)<18){
+      it.taken = true;
+      score += it.score; 
+      if(it.heal) { lives = Math.min(lives+1, MAX_LIVES); beep(1200,0.1,'sine',0.3); }
+      else beep(880,0.08,'triangle',0.2);
+    }
+    if(it.x < -20 || it.taken) items.splice(i,1);
+  }
+
+  // Obstacles
+  for(let i=obstacles.length-1;i>=0;i--){
+    const d=obstacles[i];
+    d.x -= player.speed*1.2;
+    
+    if(d.type === 'Drone'){
+      if(d.y<G.GROUND) d.y += Math.sin(t*0.1)*0.5;
+    } else if(d.type === 'DiveDrone'){
+      if(d.y < G.GROUND - 20) d.vy += 0.3;
+      else d.vy = 0;
+      d.y += d.vy;
+    } else if(d.type === 'Mine'){
+      d.y = d.startY + Math.sin(t*0.1 + d.phase) * d.amplitude;
+    }
+    
+    if(!d.hit){
+      let hit = false;
+      if(d.type === 'Spike'){
+        if(player.onG && Math.abs(d.x-player.x)<14){ hit=true; }
+      } else {
+        if(Math.abs(d.x-player.x)<12 && Math.abs(d.y-player.y+16)<16){ hit=true; }
+      }
+
+      if(hit){
+        d.hit = true;
+        lives--;
+        beep(100,0.2,'sawtooth',0.3);
+      }
+    }
+    
+    if(d.x < -20 || d.hit) obstacles.splice(i,1);
+  }
+
+  // Boss Shots (Beer/Homing)
+  for(let i=bossShots.length-1;i>=0;i--){
+    const s=bossShots[i];
+    
+    if(s.type === 'BeerShot') {
+      s.vy += s.gravity; // 重力を適用
+    }
+    else if(s.type === 'Homing'){
+        const targetX = player.x;
+        const targetY = player.y - 15;
+        const dx = targetX - s.x;
+        const dy = targetY - s.y;
+        const angle = Math.atan2(dy, dx);
+        const currentSpeed = Math.sqrt(s.vx*s.vx + s.vy*s.vy);
+        const homingFactor = 0.05;
+        
+        // 旋回能力を制限し、避けられるように調整
+        const MAX_TURN_RATE = 0.05; 
+        let currentAngle = Math.atan2(s.vy, s.vx);
+        let angleDiff = angle - currentAngle;
+
+        if (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+        if (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+        if (angleDiff > MAX_TURN_RATE) angleDiff = MAX_TURN_RATE;
+        else if (angleDiff < -MAX_TURN_RATE) angleDiff = -MAX_TURN_RATE;
+
+        let newAngle = currentAngle + angleDiff;
+        const MAX_SPEED = 5.0; // 最大速度も制限
+        
+        s.vx = Math.cos(newAngle) * currentSpeed;
+        s.vy = Math.sin(newAngle) * currentSpeed;
+
+        // 速度が最大速度を超えないように調整
+        const mag = Math.sqrt(s.vx*s.vx + s.vy*s.vy);
+        if(mag > MAX_SPEED) {
+            s.vx = (s.vx/mag) * MAX_SPEED;
+            s.vy = (s.vy/mag) * MAX_SPEED;
+        }
+    }
+
+    s.x += s.vx;
+    s.y += s.vy;
+    
+    if(Math.abs(s.x-player.x)<10 && Math.abs(s.y-player.y+16)<16){
+      lives--;
+      bossShots.splice(i,1);
+      beep(100,0.2,'sawtooth',0.3);
+    }
+    else if(s.x < -20 || s.y > G.H+20) bossShots.splice(i,1);
+  }
+
+  // Boss Laser Collision
+  if(boss.beamWidth > 0){
+    const beamY = boss.y; // Y座標を更新
+    const pY = player.y - 24;
+    const pX = player.x;
+
+    if(pX < boss.x && Math.abs(pY - beamY) < boss.beamWidth/2){
+      lives--;
+      boss.beamWidth = 0; 
+      beep(100,0.2,'sawtooth',0.3);
+    }
+  }
+
+  // Player Bullets
+  for(let i=bullets.length-1;i>=0;i--){
+    bullets[i].x += 5;
+    if(bullets[i].x > G.W) bullets.splice(i,1);
+  }
+
+  // Stage Clear Check
+  if(!isBoss && score >= currentStage.target){
+    if(stageIndex < STAGES.length-1){
+      loadStage(stageIndex+1);
+      beep(600,0.1,'sine',0.2); beep(800,0.2,'sine',0.2);
+    }
+  }
+
+  // Game Over
+  if(lives <= 0){
+    state = 'OVER';
+    best = Math.max(best, score);
+    document.getElementById('overTitle').textContent = 'GAME OVER';
+    document.getElementById('scoreline').textContent = `SCORE: ${score} / BEST: ${best}`;
+    overEl.style.display = 'flex';
+  }
+
+  // Update UI
+  scEl.textContent = score;
+  lfEl.textContent = lives;
+}
+
+function updateEnding(){
+  endScrollY -= 0.6;
+  if(endScrollY < - (CREDITS.length * 20 + 100)){
+    state = 'OVER';
+    best = Math.max(best, score);
+    document.getElementById('overTitle').textContent = 'YOU WIN!';
+    document.getElementById('scoreline').textContent = `FINAL SCORE: ${score}`;
+    document.getElementById('retry').textContent = 'PLAY AGAIN';
+    overEl.style.display = 'flex';
+  }
+}
+
+// ====================================
+//  MAIN LOOP (変更なし)
+// ====================================
+function loop(){
+  ctx.clearRect(0,0,G.W,G.H);
+  
+  if(state === 'PLAY' || state === 'ENDING'){
+    drawSky();
+    drawGround();
+    items.forEach(drawBottle);
+    
+    obstacles.forEach(d=>{
+        if(d.type === 'Drone' || d.type === 'DiveDrone') drawDrone(d);
+        else if(d.type === 'Spike') drawSpike(d);
+        else if(d.type === 'Mine') drawMine(d);
+    });
+
+    drawMoai();
+    
+    ctx.fillStyle='#e5f0ff';
+    bullets.forEach(b=>{ ctx.beginPath(); ctx.arc(b.x,b.y,3,0,6.28); ctx.fill(); });
+    
+    if(currentStage.boss && boss.active) {
+      drawBoss();
+      bossShots.forEach(s => {
+        if(s.type === 'BeerShot') drawBeer(s);
+        else if(s.type === 'Homing') drawHomingShot(s);
+      });
+    }
+
+    if(state === 'PLAY') updatePlay();
+    if(state === 'ENDING') {
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0,0,G.W,G.H);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      CREDITS.forEach((line, i)=>{
+        ctx.fillText(line, G.W/2, endScrollY + i*20);
+      });
+      updateEnding();
+    }
+  } else {
+    drawSky();
+    drawGround();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ====================================
+//  INPUTS (変更なし)
+// ====================================
+function jump(){
+  if(state!=='PLAY') return;
+  if(player.onG){
+    player.vy = -8.5;
+    player.onG = false;
+    beep(700,0.05,'square',0.1);
+  }
+}
+function drop(){
+  if(state!=='PLAY') return;
+  if(!player.onG) player.vy += 2.5;
+}
+function shoot(){
+  if(state!=='PLAY') return;
+  if(currentStage.boss && boss.active){
+    bullets.push({x:player.x+10, y:player.y-30});
+    beep(900,0.04,'square',0.1);
+  }
+}
+
+document.getElementById('go').onclick = startGame;
+document.getElementById('retry').onclick = initGame;
+
+const jBtn = document.getElementById('jump');
+const dBtn = document.getElementById('drop');
+const sBtn = document.getElementById('shot');
+
+jBtn.addEventListener('touchstart',e=>{e.preventDefault();jump()}, {passive:false});
+dBtn.addEventListener('touchstart',e=>{e.preventDefault();drop()}, {passive:false});
+sBtn.addEventListener('touchstart',e=>{e.preventDefault();shoot()}, {passive:false});
+
+addEventListener('keydown', e=>{
+  if(e.code==='Enter' && (state==='START'||state==='OVER')) { 
+    if(state==='OVER') initGame(); else startGame(); 
+  }
+  if(e.code==='Space' || e.code==='ArrowUp') jump();
+  if(e.code==='ArrowDown') drop();
+  if(e.code==='KeyF') shoot();
+});
+
+// START
+initGame();
+loop();
+
+})();
+</script>
+</body>
+</html>
